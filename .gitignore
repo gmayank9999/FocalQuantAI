@@ -52,6 +52,10 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# Allow Issue_3_Stock_Data_Simulation data folder
+!Issue_3_Stock_Data_Simulation/data/**
+!Issue_3_Stock_Data_Simulation/data/*.csv
+
 # Reports
 *.txt
 *.pdf
