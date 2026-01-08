@@ -1,8 +1,6 @@
 """
 Stock Data Movement Simulation Engine
 ======================================
-
-Generates synthetic OHLCV tick data using GBM volatility model.
 """
 
 import pandas as pd
@@ -11,10 +9,16 @@ from datetime import datetime, timedelta
 from typing import Tuple, Optional, Union
 
 try:
-    from .gbm_model import generate_gbm_returns, scale_volatility
+    from .gbm_model import generate_gbm_path
+    from .gbm_model import scale_volatility as gbm_scale_volatility
+    from .bridge_model import generate_bridge_path
+    from .bridge_model import scale_volatility as bridge_scale_volatility
     from .validators import validate_ohlcv, validate_simulation_params
 except ImportError:
-    from gbm_model import generate_gbm_returns, scale_volatility
+    from gbm_model import generate_gbm_path
+    from gbm_model import scale_volatility as gbm_scale_volatility
+    from bridge_model import generate_bridge_path
+    from bridge_model import scale_volatility as bridge_scale_volatility
     from validators import validate_ohlcv, validate_simulation_params
 
 
@@ -23,16 +27,19 @@ class StockDataSimulator:
     Stock Data Movement Simulation Engine
     
     Generates synthetic OHLCV (Open, High, Low, Close, Volume) tick data
-    using Geometric Brownian Motion (GBM) volatility model.
+    using either GBM (Geometric Brownian Motion) or Brownian Bridge models.
     
     Parameters
     ----------
+    model : str, optional
+        Volatility model to use: 'gbm' or 'bridge' (default: 'gbm')
     seed : int, optional
         Random seed for reproducibility
         
     Examples
     --------
-    >>> simulator = StockDataSimulator(seed=42)
+    >>> # Using GBM model
+    >>> simulator = StockDataSimulator(model='gbm', seed=42)
     >>> df = simulator.simulate(
     ...     start_time="2025-12-10 09:15:00",
     ...     end_time="2025-12-10 15:30:00",
@@ -41,9 +48,17 @@ class StockDataSimulator:
     ...     ohlcv_seed=(100, 125, 95, 103, 5300)
     ... )
     >>> print(f"Generated {len(df)} ticks")
+    
+    >>> # Using Brownian Bridge model
+    >>> simulator = StockDataSimulator(model='bridge', seed=42)
+    >>> df = simulator.simulate(...)
     """
     
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, model: str = 'gbm', seed: Optional[int] = None):
+        if model not in ['gbm', 'bridge']:
+            raise ValueError(f"Invalid model '{model}'. Choose 'gbm' or 'bridge'")
+        
+        self.model = model
         self.seed = seed
         
         if seed is not None:
@@ -102,7 +117,7 @@ class StockDataSimulator:
         time_diff_minutes = (end_time - start_time).total_seconds() / 60
         n_intervals = int(time_diff_minutes / granularity_minutes)
         
-        # Generate timestamps - do NOT include endpoint
+        # Generate timestamps - do NOT include endpoint [2025-12-10 09:15:00 ,2025-12-10 09:16:00, ..., 2025-12-10 15:29:00]
         timestamps = [start_time + timedelta(minutes=i * granularity_minutes) 
                      for i in range(n_intervals)]
         
@@ -152,39 +167,52 @@ class StockDataSimulator:
         closes = np.zeros(n)
         volumes = np.zeros(n)
         
-        # Generate OHLC bars from price path
+        # Generate OHLC bars from price path with natural high/low progression
         for i in range(n):
-            opens[i] = price_path[i]
+            # Add small noise to open price (gap from previous close)
+            if i == 0:
+                opens[i] = price_path[i]
+            else:
+                gap_pct = np.random.uniform(-0.001, 0.001)
+                gap_noise = price_path[i] * gap_pct
+                opens[i] = price_path[i] + gap_noise
+            
             closes[i] = price_path[i + 1]  # Next point is the close
             
-            # Calculate what high/low should be to eventually reach extremes
-            # We'll adjust the bar with max potential to actually hit seed_high/low
+            # Base high/low from open/close
             base_high = max(opens[i], closes[i])
             base_low = min(opens[i], closes[i])
             
-            # Generate intrabar high/low with reasonable range (5-10% of price)
+            # Generate intrabar high/low with volatility-based range
             intrabar_pct = (volatility_index / 25) * 0.05  # 0-5% based on volatility
             highs[i] = base_high * (1 + intrabar_pct * np.random.uniform(0.5, 2.0))
             lows[i] = base_low * (1 - intrabar_pct * np.random.uniform(0.5, 2.0))
             
-            # Generate volume (must be integer - number of shares)
-            volumes[i] = int(seed_volume * np.random.uniform(0.7, 1.3))
+            # Generate volume - random variation around seed (avg will be ~seed_volume)
+            volumes[i] = int(seed_volume * np.random.uniform(0.8, 1.2))
         
-        # Find indices for extreme values BEFORE consistency check
-        max_idx_prelim = highs.argmax()
-        min_idx_prelim = lows.argmin()
+        # Now find which bars should reflect the extremes
+        # If price_path[j] is maximum, then bars j-1 and j will touch that price
+        max_path_idx = np.argmax(price_path)
+        min_path_idx = np.argmin(price_path)
         
-        # Ensure OHLC consistency for all bars EXCEPT the ones we'll force
+        # Ensure OHLC consistency for all bars first
         for i in range(n):
             highs[i] = max(highs[i], opens[i], closes[i])
             lows[i] = min(lows[i], opens[i], closes[i])
-            # Keep positive but don't prevent seed extremes
-            if lows[i] > seed_low:
-                lows[i] = max(seed_low * 0.5, lows[i])
+            # Ensure positive prices
+            lows[i] = max(0.01, lows[i])
         
-        # FORCE exact seed constraints (may violate OHLC rules for extreme bars)
-        highs[max_idx_prelim] = seed_high
-        lows[min_idx_prelim] = seed_low
+        # Now set seed extremes for bars that touch those prices in price_path
+        # Bar i uses price_path[i] as open and price_path[i+1] as close
+        for i in range(n):
+            # Check if this bar touches the maximum price
+            if i == max_path_idx or (i > 0 and i == max_path_idx - 1):
+                highs[i] = seed_high
+            
+            # Check if this bar touches the minimum price  
+            if i == min_path_idx or (i > 0 and i == min_path_idx - 1):
+                lows[i] = seed_low
         
         return {
             'timestamp': timestamps,
@@ -198,72 +226,77 @@ class StockDataSimulator:
     def _generate_constrained_price_path(self, n: int, start: float, end: float,
                                         max_high: float, min_low: float,
                                         volatility_index: float) -> np.ndarray:
-        """Generate a price path from start to end that will reach max_high and min_low."""
+        """Generate a price path from start to end that naturally reaches max_high and min_low."""
         # We need n+1 points (n bars have n+1 price points)
         path = np.zeros(n + 1)
         path[0] = start
         path[n] = end
         
-        # Generate random walk in between using GBM
-        annual_vol = scale_volatility(volatility_index)
-        step_vol = annual_vol / np.sqrt(252 * 375)
-        
-        # Decide where to place extreme points
+        # Decide where to place extreme points (natural positions in timeline)
         # Place high somewhere in first 60% of path
         # Place low somewhere in middle-to-end 40-80% of path
         high_idx = np.random.randint(int(n * 0.2), int(n * 0.6))
         low_idx = np.random.randint(int(n * 0.4), int(n * 0.8))
         
-        # Use bridge sampling - generate path conditioned on endpoints
-        for i in range(1, n):
-            # Linear interpolation + random deviation
-            t = i / n
-            drift_price = start + (end - start) * t
+        if self.model == 'bridge':
+            # Use Brownian Bridge - directly generates constrained path
+            path = generate_bridge_path(n, start, end, volatility_index, self.seed)
             
-            # Add random noise
-            noise = np.random.normal(0, step_vol * start * np.sqrt(i))
-            path[i] = drift_price + noise
+            # Naturally inject extremes at chosen points
+            path[high_idx] = max_high
+            path[low_idx] = min_low
             
-            # No artificial bounds - let it be natural
+            # Smooth the path around extremes to make transitions natural
+            # Before high peak
+            if high_idx > 2:
+                for j in range(max(1, high_idx - 3), high_idx):
+                    path[j] = path[j] * 0.7 + max_high * 0.3 * ((high_idx - j) / 3)
+            # After high peak
+            if high_idx < n - 2:
+                for j in range(high_idx + 1, min(n, high_idx + 4)):
+                    path[j] = path[j] * 0.7 + max_high * 0.3 * ((4 - (j - high_idx)) / 3)
+            
+            # Before low dip
+            if low_idx > 2:
+                for j in range(max(1, low_idx - 3), low_idx):
+                    path[j] = path[j] * 0.7 + min_low * 0.3 * ((low_idx - j) / 3)
+            # After low dip
+            if low_idx < n - 2:
+                for j in range(low_idx + 1, min(n, low_idx + 4)):
+                    path[j] = path[j] * 0.7 + min_low * 0.3 * ((4 - (j - low_idx)) / 3)
+            
+            return path
         
-        # Force extreme points to be near the targets
-        # This ensures the highs/lows will reach seed values
-        path[high_idx] = max_high * np.random.uniform(0.95, 0.99)
-        path[low_idx] = min_low * np.random.uniform(1.01, 1.05)
+        # GBM model
+        path = generate_gbm_path(n, start, end, volatility_index, self.seed)
+        
+        # Inject exact extreme values at chosen points
+        path[high_idx] = max_high
+        path[low_idx] = min_low
+        
+        # Smooth transitions around extremes for natural movement
+        # Gradual build-up to high
+        if high_idx > 2:
+            for j in range(max(1, high_idx - 3), high_idx):
+                blend_factor = (high_idx - j) / 3
+                path[j] = path[j] * 0.6 + max_high * 0.4 * (1 - blend_factor)
+        # Gradual descent from high
+        if high_idx < n - 2:
+            for j in range(high_idx + 1, min(n, high_idx + 4)):
+                blend_factor = (j - high_idx) / 3
+                path[j] = path[j] * 0.6 + max_high * 0.4 * (1 - blend_factor)
+        
+        # Gradual descent to low
+        if low_idx > 2:
+            for j in range(max(1, low_idx - 3), low_idx):
+                blend_factor = (low_idx - j) / 3
+                path[j] = path[j] * 0.6 + min_low * 0.4 * (1 - blend_factor)
+        # Gradual recovery from low
+        if low_idx < n - 2:
+            for j in range(low_idx + 1, min(n, low_idx + 4)):
+                blend_factor = (j - low_idx) / 3
+                path[j] = path[j] * 0.6 + min_low * 0.4 * (1 - blend_factor)
         
         return path
     
-    def _generate_intrabar_range(self, open_price: float, close_price: float,
-                                volatility_index: float) -> float:
-        """Generate realistic high-low range within a bar."""
-        # Base range from open-close movement
-        oc_range = abs(close_price - open_price)
-        
-        # Add volatility-dependent expansion (0.5% to 2% of price)
-        vol_factor = 0.005 + (volatility_index / 25) * 0.015
-        vol_range = open_price * vol_factor
-        
-        return oc_range + vol_range
-    
-    def _generate_volume(self, base_volume: float, volatility_index: float,
-                        abs_return: float) -> float:
-        """Generate volume for a bar."""
-        # Base multiplier from volatility index
-        vol_multiplier = 1.0 + (volatility_index / 25) * 0.8
-        
-        # Additional boost from large price moves
-        movement_boost = 1.0 + abs_return * 50
-        
-        # Random variation (±30%)
-        random_factor = np.random.uniform(0.7, 1.3)
-        
-        # Occasional volume spikes (5% chance of 2-3x volume)
-        if np.random.random() < 0.05:
-            spike_factor = np.random.uniform(2.0, 3.0)
-        else:
-            spike_factor = 1.0
-        
-        volume = (base_volume * vol_multiplier * movement_boost * 
-                 random_factor * spike_factor)
-        
-        return max(0, volume)
+

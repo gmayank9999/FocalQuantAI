@@ -81,3 +81,62 @@ def generate_gbm_returns(n_steps: int,
     returns = step_drift + step_vol * random_shocks
     
     return returns
+
+
+def generate_gbm_path(n_steps: int,
+                      start_value: float,
+                      end_value: float,
+                      volatility_index: float,
+                      seed: Optional[int] = None) -> np.ndarray:
+    """
+    Generate price path using GBM with endpoint constraint.
+    
+    Creates a random walk path from start_value to end_value using
+    linear interpolation plus GBM-style random deviations.
+    
+    Parameters
+    ----------
+    n_steps : int
+        Number of time steps (will generate n_steps + 1 points)
+    start_value : float
+        Starting price
+    end_value : float
+        Ending price
+    volatility_index : float
+        Volatility level (1-25 scale)
+    seed : int, optional
+        Random seed for reproducibility
+        
+    Returns
+    -------
+    np.ndarray
+        Array of n_steps + 1 price points
+        
+    Implementation Details
+    ----------------------
+    Uses linear interpolation between start and end with added
+    GBM-style random deviations scaled by volatility and sqrt(time).
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    # Convert volatility index to per-step volatility
+    annual_vol = scale_volatility(volatility_index)
+    step_vol = annual_vol / np.sqrt(252 * 375)
+    
+    # Initialize path with n_steps + 1 points
+    path = np.zeros(n_steps + 1)
+    path[0] = start_value
+    path[n_steps] = end_value
+    
+    # Generate path using linear interpolation + random noise
+    for i in range(1, n_steps):
+        # Linear interpolation component
+        t = i / n_steps
+        drift_price = start_value + (end_value - start_value) * t
+        
+        # Add GBM-style random noise scaled by sqrt(time)
+        noise = np.random.normal(0, step_vol * start_value * np.sqrt(i))
+        path[i] = drift_price + noise
+    
+    return path

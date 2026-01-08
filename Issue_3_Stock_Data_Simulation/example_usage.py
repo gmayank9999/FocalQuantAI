@@ -2,7 +2,7 @@
 Simple Usage Example
 ====================
 
-Demonstrates basic usage of the Stock Data Simulation Engine.
+Demonstrates the usage of the Stock Data Simulation Engine.
 """
 
 import sys
@@ -18,25 +18,34 @@ def main():
     print("="*70)
     
     # Initialize simulator with seed for reproducibility
-    simulator = StockDataSimulator(seed=42)
+    model_type = 'gbm'  # Use model_type='gbm' for GBM or model_type='bridge' for Brownian Bridge
+    simulator = StockDataSimulator(model=model_type, seed=42)
+    
+    # Define parameters
+    start_time = "2025-12-10 09:15:00"
+    end_time = "2025-12-10 15:30:00"
+    granularity_minutes = 1
+    volatility_index = 5
+    ohlcv_seed = (100, 125, 95, 103, 5300)
     
     # Example parameters from requirements
     print("\nInput Parameters:")
     print("-" * 70)
-    print("Start Time: 2025-12-10 09:15:00")
-    print("End Time: 2025-12-10 15:30:00")
-    print("Granularity: 1 minute")
-    print("Volatility Index: 5 (scale 1-25)")
-    print("OHLCV Seed: (100, 125, 95, 103, 5300)")
+    print(f"Model: {model_type.upper()}")
+    print(f"Start Time: {start_time}")
+    print(f"End Time: {end_time}")
+    print(f"Granularity: {granularity_minutes} minute")
+    print(f"Volatility Index: {volatility_index} (scale 1-25)")
+    print(f"OHLCV Seed: {ohlcv_seed}")
     
     # Generate synthetic data
     print("\nGenerating synthetic tick data...")
     df = simulator.simulate(
-        start_time="2025-12-10 09:15:00",
-        end_time="2025-12-10 15:30:00",
-        granularity_minutes=1,
-        volatility_index=20,
-        ohlcv_seed=(100, 1510, 80, 90, 5300)
+        start_time=start_time,
+        end_time=end_time,
+        granularity_minutes=granularity_minutes,
+        volatility_index=volatility_index,
+        ohlcv_seed=ohlcv_seed
     )
     
     print(f"[OK] Generated {len(df)} data points")
@@ -62,15 +71,15 @@ def main():
     print(f"Price Range: ${df['low'].min():.2f} - ${df['high'].max():.2f}")
     print(f"Total Volume: {df['volume'].sum():,.0f}")
     
-    # Export to CSV
-    output_path = 'data/example_output.csv'
+    # Export to CSV with model name
+    output_path = f'data/example_output_{model_type}.csv'
     try:
         df.to_csv(output_path, index=False)
         print(f"\n[OK] Data exported to {output_path}")
     except PermissionError:
-        # File is locked - try alternative filename
+        # File is locked - try alternative filename with timestamp
         import time
-        alt_path = f'data/example_output_{int(time.time())}.csv'
+        alt_path = f'data/example_output_{model_type}_{int(time.time())}.csv'
         try:
             df.to_csv(alt_path, index=False)
             print(f"\n[OK] Data exported to {alt_path}")
